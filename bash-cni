@@ -1,0 +1,111 @@
+#!/bin/bash -e
+
+if [[ ${DEBUG} -gt 0 ]]; then set -x; fi
+
+exec 3>&1 # make stdout available as fd 3 for the result
+exec &>> /var/log/bash-cni-plugin.log
+
+IP_STORE=/tmp/reserved_ips # all reserved ips will be stored there
+
+echo "CNI command: $CNI_COMMAND" 
+
+stdin=`cat /dev/stdin`
+echo "stdin: $stdin"
+
+allocate_ip(){
+	for ip in "${all_ips[@]}"
+	do
+		reserved=false
+		for reserved_ip in "${reserved_ips[@]}"
+		do
+			if [ "$ip" = "$reserved_ip" ]; then
+				reserved=true
+				break
+			fi
+		done
+		if [ "$reserved" = false ] ; then
+			echo "$ip" >> $IP_STORE
+			echo "$ip"
+			return
+		fi
+	done
+}
+
+case $CNI_COMMAND in
+ADD)
+	network=$(echo "$stdin" | jq -r ".network")
+	subnet=$(echo "$stdin" | jq -r ".subnet")
+	subnet_mask_size=$(echo $subnet | awk -F  "/" '{print $2}')
+
+	all_ips=$(nmap -sL $subnet | grep "Nmap scan report" | awk '{print $NF}')
+	all_ips=(${all_ips[@]})
+	skip_ip=${all_ips[0]}
+	gw_ip=${all_ips[1]}
+	reserved_ips=$(cat $IP_STORE 2> /dev/null || printf "$skip_ip\n$gw_ip\n") # reserving 10.244.0.0 and 10.244.0.1 
+	reserved_ips=(${reserved_ips[@]})
+	printf '%s\n' "${reserved_ips[@]}" > $IP_STORE
+	container_ip=$(allocate_ip)
+
+	mkdir -p /var/run/netns/
+	ln -sfT $CNI_NETNS /var/run/netns/$CNI_CONTAINERID
+
+	rand=$(tr -dc 'A-F0-9' < /dev/urandom | head -c4)
+	host_if_name="veth$rand"
+	ip link add $CNI_IFNAME type veth peer name $host_if_name 
+
+	ip link set $host_if_name up 
+	ip link set $host_if_name master cni0 
+
+	ip link set $CNI_IFNAME netns $CNI_CONTAINERID
+	ip netns exec $CNI_CONTAINERID ip link set $CNI_IFNAME up
+	ip netns exec $CNI_CONTAINERID ip addr add $container_ip/$subnet_mask_size dev $CNI_IFNAME
+	ip netns exec $CNI_CONTAINERID ip route add default via $gw_ip dev $CNI_IFNAME 
+
+	mac=$(ip netns exec $CNI_CONTAINERID ip link show eth0 | awk '/ether/ {print $2}')
+echo "{
+  \"cniVersion\": \"0.3.1\",
+  \"interfaces\": [                                            
+      {
+          \"name\": \"eth0\",
+          \"mac\": \"$mac\",                            
+          \"sandbox\": \"$CNI_NETNS\" 
+      }
+  ],
+  \"ips\": [
+      {
+          \"version\": \"4\",
+          \"address\": \"$container_ip/$subnet_mask_size\",
+          \"gateway\": \"$gw_ip\",          
+          \"interface\": 0 
+      }
+  ]
+}" >&3
+
+;;
+
+DEL)
+	ip=$(ip netns exec $CNI_CONTAINERID ip addr show eth0 | awk '/inet / {print $2}' | sed  s%/.*%% || echo "")
+	if [ ! -z "$ip" ]
+	then
+		sed -i "/$ip/d" $IP_STORE
+	fi
+;;
+
+GET)
+	echo "GET not supported"
+	exit 1
+;;
+
+VERSION)
+echo '{
+  "cniVersion": "0.3.1", 
+  "supportedVersions": [ "0.3.0", "0.3.1", "0.4.0" ] 
+}' >&3
+;;
+
+*)
+  echo "Unknown cni commandn: $CNI_COMMAND" 
+  exit 1
+;;
+
+esac
