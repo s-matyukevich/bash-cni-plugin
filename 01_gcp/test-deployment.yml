@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-master
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    ports:
+    - containerPort: 80
+  nodeSelector:
+    kubernetes.io/hostname: k8s-master
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bash-master
+spec:
+  containers:
+  - name: ubuntu
+    image: ubuntu
+    command:
+      - "bin/bash"
+      - "-c"
+      - "sleep 10000"
+  nodeSelector:
+    kubernetes.io/hostname: k8s-master
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-worker
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    ports:
+    - containerPort: 80
+  nodeSelector:
+    kubernetes.io/hostname: k8s-worker
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bash-worker
+spec:
+  containers:
+  - name: ubuntu
+    image: ubuntu
+    command:
+      - "bin/bash"
+      - "-c"
+      - "sleep 10000"
+  nodeSelector:
+    kubernetes.io/hostname: k8s-worker
+
